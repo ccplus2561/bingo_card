@@ -1,4 +1,4 @@
-import { SIZE, LETTERS, FILLABLE, CENTER, isFree } from './config.js';
+import { SIZE, MIN, MAX, FILLABLE, CENTER, isFree } from './config.js';
 import { validateGrid } from './validation.js';
 import { generateGrid, fillBlanks, emptyGrid } from './random.js';
 import { findCompletedLines, LINES } from './bingo.js';
@@ -12,12 +12,13 @@ let marked = newMarked();
 let cells = {};
 let notice = '';
 let prevLines = 0;
+let ended = false; // 玩家手動結束後不能再標記
 let animate = true; // 只在整張重建時播放入場動畫
 
 const $ = id => document.getElementById(id);
 const gridEl = $('grid'), progressEl = $('progress'), messagesEl = $('messages');
 const bannerEl = $('banner'), introEl = $('intro'), hintEl = $('hint');
-const btn = { random: $('btn-random'), fill: $('btn-fill'), clear: $('btn-clear'), done: $('btn-done'), unmark: $('btn-unmark'), restart: $('btn-restart') };
+const btn = { random: $('btn-random'), fill: $('btn-fill'), clear: $('btn-clear'), done: $('btn-done'), unmark: $('btn-unmark'), end: $('btn-end'), restart: $('btn-restart') };
 const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function newMarked() {
@@ -49,7 +50,7 @@ function buildGrid() {
     for (let c = 0; c < SIZE; c++) {
       const wrap = document.createElement('div');
       const key = `${r},${c}`;
-      wrap.className = 'cell col-' + c;
+      wrap.className = 'cell';
       if (animate && !reduced) { wrap.classList.add('enter'); wrap.style.animationDelay = `${i++ * 18}ms`; }
       if (isFree(r, c)) {
         wrap.classList.add('free');
@@ -60,7 +61,7 @@ function buildGrid() {
         input.type = 'text'; input.inputMode = 'numeric'; input.maxLength = 2; input.autocomplete = 'off';
         input.value = grid[r][c];
         input.dataset.r = r; input.dataset.c = c;
-        input.setAttribute('aria-label', `第 ${r + 1} 列 ${LETTERS[c]} 欄`);
+        input.setAttribute('aria-label', `第 ${r + 1} 列第 ${c + 1} 欄`);
         input.addEventListener('focus', () => input.select());
         input.addEventListener('input', () => {
           input.value = input.value.replace(/\D/g, '');
@@ -78,9 +79,10 @@ function buildGrid() {
         cells[key] = { wrap, el: input };
       } else {
         const b = document.createElement('button');
-        b.type = 'button'; b.className = 'num'; b.textContent = grid[r][c];
-        b.setAttribute('aria-label', `${LETTERS[c]} ${grid[r][c]}`);
+        b.type = 'button'; b.className = 'num'; b.disabled = ended; b.textContent = grid[r][c];
+        b.setAttribute('aria-label', `號碼 ${grid[r][c]}`);
         b.addEventListener('click', () => {
+          if (ended) return;
           marked[r][c] = !marked[r][c];
           beep(marked[r][c] ? 740 : 420, .07); buzz(12);
           refresh(key);
@@ -107,19 +109,19 @@ function focusNext(r, c, step) { // 依閱讀順序（跳過 FREE）移動
 function refresh(poppedKey) {
   const playing = mode === 'play';
   for (const b of [btn.random, btn.fill, btn.clear, btn.done]) b.hidden = playing;
-  btn.unmark.hidden = btn.restart.hidden = !playing;
-  $('range-hint').hidden = playing;
+  btn.restart.hidden = !playing;
+  btn.end.hidden = !playing || ended; btn.unmark.hidden = !playing || ended;
   $('step-1').className = playing ? 'done' : 'on';
   $('step-2').className = playing ? 'on' : '';
   document.body.dataset.mode = mode;
   introEl.textContent = playing
-    ? '點擊被叫出的號碼來標記，再點一次可取消。'
-    : '填入 24 格數字，或使用「隨機產生」。每欄範圍固定，同一張卡不可重複。';
+    ? (ended ? '遊戲已結束。' : '點擊被叫出的號碼來標記，連成線後可繼續玩，準備好再按「結束遊戲」。')
+    : `填入 24 格數字（${MIN}～${MAX}，不可重複），或使用「隨機產生」。`;
   playing ? refreshPlay(poppedKey) : refreshEdit();
 }
 
 function refreshEdit() {
-  bannerEl.hidden = true; hintEl.hidden = true;
+  bannerEl.hidden = true; hintEl.hidden = true; drawLines([]);
   const { errors, duplicates, messages, filled } = validateGrid(grid);
   for (const [key, { wrap, el }] of Object.entries(cells)) {
     if (!el) continue;
@@ -158,13 +160,35 @@ function refreshPlay(poppedKey) {
   hintEl.textContent = near ? `🔥 有 ${near} 條線只差 1 格就 BINGO！` : '';
   messagesEl.replaceChildren();
   bannerEl.hidden = lines.length === 0;
-  bannerEl.textContent = lines.length ? `🎉 BINGO！已完成 ${lines.length} 條線` : '';
+  bannerEl.textContent = lines.length ? (ended ? `🏁 遊戲結束，共完成 ${lines.length} 條線` : `🎉 已完成 ${lines.length} 條線，可繼續！`) : '';
+  hintEl.hidden = hintEl.hidden || ended;
+  drawLines(lines);
   if (lines.length > prevLines) {
     bannerEl.classList.remove('pop'); void bannerEl.offsetWidth; bannerEl.classList.add('pop');
     launchConfetti(); fanfare(); buzz([60, 40, 120]);
   }
   prevLines = lines.length;
 }
+
+/* ---------- 連線繪製 ---------- */
+const NS = 'http://www.w3.org/2000/svg';
+let lastLines = [];
+function drawLines(lines) {
+  lastLines = lines;
+  const svg = $('lines'); svg.replaceChildren();
+  if (!lines.length) return;
+  const g = gridEl.getBoundingClientRect();
+  svg.setAttribute('viewBox', `0 0 ${g.width} ${g.height}`);
+  const ctr = ([r, c]) => { const b = cells[`${r},${c}`].wrap.getBoundingClientRect(); return [b.left - g.left + b.width / 2, b.top - g.top + b.height / 2]; };
+  for (const line of lines) {
+    const [x1, y1] = ctr(line[0]), [x2, y2] = ctr(line[SIZE - 1]);
+    const L = Math.hypot(x2 - x1, y2 - y1) || 1, ex = (x2 - x1) / L * 14, ey = (y2 - y1) / L * 14;
+    const p = document.createElementNS(NS, 'line');
+    for (const [k, v] of Object.entries({ x1: x1 - ex, y1: y1 - ey, x2: x2 + ex, y2: y2 + ey, pathLength: 1 })) p.setAttribute(k, v);
+    svg.append(p);
+  }
+}
+addEventListener('resize', () => lastLines.length && drawLines(lastLines));
 
 /* ---------- 操作 ---------- */
 function setGrid(next, msg) {
@@ -177,14 +201,20 @@ async function complete() {
   if (filled < FILLABLE) { notice = `還有 ${FILLABLE - filled} 格未填，填滿後才能完成。`; refresh(); shake(); return; }
   if (messages.length) { notice = '請先修正標示的錯誤或重複數字。'; refresh(); shake(); return; }
   if (!await ask('鎖定這張卡片？', '完成後數字將鎖定，無法修改。要開始遊戲嗎？', '開始遊戲')) return;
-  mode = 'play'; marked = newMarked(); prevLines = 0; notice = ''; animate = true;
+  mode = 'play'; ended = false; marked = newMarked(); prevLines = 0; notice = ''; animate = true;
   buildGrid(); refresh(); toast('卡片已鎖定，開始遊戲！');
 }
 
 async function restart() {
   if (!await ask('重新開始？', '會清除這張卡片與所有標記，且無法復原。', '重新開始')) return;
-  mode = 'edit'; grid = emptyGrid(); marked = newMarked(); prevLines = 0; notice = ''; animate = true;
+  mode = 'edit'; ended = false; grid = emptyGrid(); marked = newMarked(); prevLines = 0; notice = ''; animate = true;
   buildGrid(); refresh();
+}
+
+async function endGame() {
+  const n = findCompletedLines(marked).length;
+  if (!await ask('結束遊戲？', `目前完成 ${n} 條線。結束後將無法再標記。`, '結束遊戲')) return;
+  ended = true; buildGrid(); refresh(); toast('遊戲結束');
 }
 
 async function unmarkAll() {
@@ -209,6 +239,7 @@ btn.clear.addEventListener('click', async () => {
   setGrid(emptyGrid());
 });
 btn.done.addEventListener('click', complete);
+btn.end.addEventListener('click', endGame);
 btn.unmark.addEventListener('click', unmarkAll);
 btn.restart.addEventListener('click', restart);
 $('btn-sound').addEventListener('click', e => {
